@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shxy-save-editor"
+version = "0.1.0"
+description = "Lightweight Tkinter save editor for SHXY (RPG Maker MZ)."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "dray" }]
+license = { text = "MIT" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: Games/Entertainment",
+  "Topic :: Utilities"
+]
+keywords = ["steam", "save editor", "rpg maker mz", "tkinter", "shxy"]
+
+[project.gui-scripts]
+shxy-save-editor = "shxy_save_editor.gui:main"
+
+[project.scripts]
+shxy-save-cli = "shxy_save_editor.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
