@@ -12,7 +12,7 @@
 - 支持快捷操作：全队属性批量增加、全队属性统一设为指定值、道具/武器/护甲数量批量填满
 - 保存前自动创建 `.bak` 备份
 - 支持导出当前存档为 JSON
-- 保留命令行工具接口，含 scan/export/import/read/edit/batch-export/compare/find-value/find-change/find-to
+- 保留命令行工具接口，含 scan/export/import/read/edit/batch-export/compare/find-value/find-change/find-to/explain-actor-stats
 
 ## 项目结构
 
@@ -82,6 +82,9 @@ python -m shxy_save_editor.cli find-change file0.rmmzsave file1.rmmzsave 0 100 -
 
 # 查找两个存档中变化后等于指定值的路径
 python -m shxy_save_editor.cli find-to file0.rmmzsave file1.rmmzsave 100 --path variables._data
+
+# 结合游戏 data 目录解释角色基础属性、装备、状态、trait 来源
+python -m shxy_save_editor.cli explain-actor-stats file1.rmmzsave --actor-id 1 --data-dir path\to\SHXY\data
 ```
 
 ## 验证

@@ -127,6 +127,156 @@ def find_changed_to_paths(data1: object, data2: object, new_value: object, prefi
     return matches
 
 
+PARAM_LABELS = ["生命", "内力", "攻击", "防御", "内功", "内防", "轻功", "悟性"]
+XPARAM_LABELS = ["命中", "闪避", "暴击"]
+
+
+def resolve_data_dir(save_file: str, data_dir: str | None) -> Path:
+    if data_dir:
+        path = Path(data_dir)
+    else:
+        save_path = Path(save_file).resolve()
+        path = save_path.parent.parent / "data" if save_path.parent.name.lower() == "save" else save_path.parent / "data"
+    if not path.exists():
+        raise FileNotFoundError(f"未找到游戏 data 目录：{path}，请使用 --data-dir 指定")
+    return path
+
+
+def read_database(data_dir: Path, file_name: str) -> list:
+    path = data_dir / file_name
+    if not path.exists():
+        raise FileNotFoundError(f"缺少数据库文件：{path}")
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def safe_db_get(db: list, item_id: int) -> dict:
+    if item_id <= 0 or item_id >= len(db) or not isinstance(db[item_id], dict):
+        return {}
+    return db[item_id]
+
+
+def collect_actor_trait_sources(actor: dict, actor_id: int, databases: dict[str, list]) -> list[tuple[str, list]]:
+    sources: list[tuple[str, list]] = []
+    actor_db = safe_db_get(databases["actors"], actor_id)
+    if actor_db.get("traits"):
+        sources.append((f"角色数据库 #{actor_id} {actor_db.get('name', '')}", actor_db.get("traits", [])))
+
+    class_id = int(actor.get("_classId", actor_db.get("classId", 0)) or 0)
+    class_db = safe_db_get(databases["classes"], class_id)
+    if class_db.get("traits"):
+        sources.append((f"职业 #{class_id} {class_db.get('name', '')}", class_db.get("traits", [])))
+
+    for equip in actor.get("_equips", []) or []:
+        if not isinstance(equip, dict):
+            continue
+        item_id = int(equip.get("_itemId", 0) or 0)
+        data_class = equip.get("_dataClass")
+        if data_class == "weapon":
+            item = safe_db_get(databases["weapons"], item_id)
+            if item.get("traits"):
+                sources.append((f"武器 #{item_id} {item.get('name', '')}", item.get("traits", [])))
+        elif data_class == "armor":
+            item = safe_db_get(databases["armors"], item_id)
+            if item.get("traits"):
+                sources.append((f"护甲 #{item_id} {item.get('name', '')}", item.get("traits", [])))
+
+    for state_id in actor.get("_states", []) or []:
+        item = safe_db_get(databases["states"], int(state_id or 0))
+        if item.get("traits"):
+            sources.append((f"状态 #{state_id} {item.get('name', '')}", item.get("traits", [])))
+
+    if actor.get("_customTraits"):
+        sources.append(("存档自定义 traits", actor.get("_customTraits", [])))
+    if actor.get("_itemEffectTraits"):
+        sources.append(("存档道具效果 traits", actor.get("_itemEffectTraits", [])))
+    return sources
+
+
+def explain_actor_stats(save_file: str, actor_id: int, data_dir_text: str | None = None) -> list[str]:
+    data_dir = resolve_data_dir(save_file, data_dir_text)
+    save = read_save(save_file)
+    actor = get_path(save, f"actors._data.{actor_id}")
+    if not isinstance(actor, dict):
+        raise ValueError(f"存档中不存在 actor_id={actor_id}")
+
+    databases = {
+        "actors": read_database(data_dir, "Actors.json"),
+        "classes": read_database(data_dir, "Classes.json"),
+        "weapons": read_database(data_dir, "Weapons.json"),
+        "armors": read_database(data_dir, "Armors.json"),
+        "states": read_database(data_dir, "States.json"),
+    }
+
+    actor_db = safe_db_get(databases["actors"], actor_id)
+    class_id = int(actor.get("_classId", actor_db.get("classId", 0)) or 0)
+    class_db = safe_db_get(databases["classes"], class_id)
+    level = int(actor.get("_level", 1) or 1)
+    param_plus = list(actor.get("_paramPlus", [0] * 8))
+    param_plus.extend([0] * (8 - len(param_plus)))
+
+    equip_params = [0] * 8
+    equip_lines: list[str] = []
+    for equip in actor.get("_equips", []) or []:
+        if not isinstance(equip, dict):
+            continue
+        item_id = int(equip.get("_itemId", 0) or 0)
+        data_class = equip.get("_dataClass")
+        db_key = "weapons" if data_class == "weapon" else "armors" if data_class == "armor" else ""
+        if not db_key or item_id <= 0:
+            continue
+        item = safe_db_get(databases[db_key], item_id)
+        params = item.get("params", [0] * 8)
+        for index in range(min(8, len(params))):
+            equip_params[index] += int(params[index] or 0)
+        equip_lines.append(f"  - {data_class} #{item_id} {item.get('name', '')}: {params}")
+
+    trait_sources = collect_actor_trait_sources(actor, actor_id, databases)
+    param_rate_sources: list[list[tuple[str, float]]] = [[] for _ in range(8)]
+    xparam_sources: list[list[tuple[str, float]]] = [[] for _ in range(3)]
+    for source_name, traits in trait_sources:
+        for trait in traits or []:
+            code = int(trait.get("code", 0) or 0)
+            data_id = int(trait.get("dataId", 0) or 0)
+            value = float(trait.get("value", 0) or 0)
+            if code == 21 and 0 <= data_id < 8:
+                param_rate_sources[data_id].append((source_name, value))
+            elif code == 22 and 0 <= data_id < 3:
+                xparam_sources[data_id].append((source_name, value))
+
+    lines = [
+        f"存档: {save_file}",
+        f"数据目录: {data_dir}",
+        f"角色: actor_id={actor_id} {actor.get('_name', actor_db.get('name', ''))}  Lv.{level}",
+        f"职业: class_id={class_id} {class_db.get('name', '')}",
+        "",
+        "[装备]",
+        *(equip_lines or ["  无装备加成"]),
+        "",
+        "[八维计算]",
+    ]
+
+    class_params = class_db.get("params", [])
+    for index, label in enumerate(PARAM_LABELS):
+        base = 0
+        if index < len(class_params) and isinstance(class_params[index], list) and level < len(class_params[index]):
+            base = int(class_params[index][level] or 0)
+        raw = base + int(param_plus[index] or 0) + equip_params[index]
+        rate = 1.0
+        for _source, value in param_rate_sources[index]:
+            rate *= value
+        final = round(raw * rate)
+        source_text = "；".join(f"{name} ×{value:g}" for name, value in param_rate_sources[index]) or "无倍率 trait"
+        lines.append(f"  {label}: 职业{base} + paramPlus{param_plus[index]} + 装备{equip_params[index]} = {raw}; 倍率 {rate:g}; 最终≈{final}")
+        lines.append(f"    来源: {source_text}")
+
+    lines.extend(["", "[命中/闪避/暴击]"])
+    for index, label in enumerate(XPARAM_LABELS):
+        total = sum(value for _source, value in xparam_sources[index])
+        source_text = "；".join(f"{name} +{value:g}" for name, value in xparam_sources[index]) or "无 code=22 来源"
+        lines.append(f"  {label}: {total:.2%}  ({source_text})")
+    return lines
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SHXY 存档工具")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -178,6 +328,11 @@ def build_parser() -> argparse.ArgumentParser:
     to_p.add_argument("save2")
     to_p.add_argument("new_value")
     to_p.add_argument("--path", default=None, help="只在指定路径下查找，例如 variables._data 或 actors._data.1")
+
+    explain_p = sub.add_parser("explain-actor-stats", help="结合游戏 data 目录解释角色属性来源")
+    explain_p.add_argument("save_file")
+    explain_p.add_argument("--actor-id", type=int, default=1)
+    explain_p.add_argument("--data-dir", default=None, help="游戏 data 目录；不填时尝试从存档路径旁边推断")
 
     return parser
 
@@ -303,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"找到 {len(matches)} 处变化后等于 {new_value!r}:")
         for path, old, new in matches:
             print(f"{path}: {old!r} -> {new!r}")
+        return 0
+
+    if args.command == "explain-actor-stats":
+        for line in explain_actor_stats(args.save_file, args.actor_id, args.data_dir):
+            print(line)
         return 0
 
     parser.error("unknown command")
