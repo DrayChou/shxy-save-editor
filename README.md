@@ -8,11 +8,11 @@
 - 支持手动选择 `save/` 目录或游戏目录
 - 自动读取 `global.rmmzsave`，展示存档槽位、地点、时长、保存时间
 - 载入单个 `file*.rmmzsave` 存档并修改常用字段
-- 支持修改：金钱、学点、当前队伍角色 `_paramPlus` 八维属性
-- 支持快捷操作：全队属性批量增加，道具/武器/护甲数量批量填满
+- 支持修改：金钱、学点、当前队伍角色 `_paramPlus` 八维属性、已定位的生活变量
+- 支持快捷操作：全队属性批量增加、全队属性统一设为指定值、道具/武器/护甲数量批量填满
 - 保存前自动创建 `.bak` 备份
 - 支持导出当前存档为 JSON
-- 保留命令行工具接口，含 scan/export/import/read/edit/batch-export/compare
+- 保留命令行工具接口，含 scan/export/import/read/edit/batch-export/compare/find-value/find-change/find-to
 
 ## 项目结构
 
@@ -73,6 +73,15 @@ python -m shxy_save_editor.cli edit file1.rmmzsave party._gold 99999999
 
 # 对比两个存档
 python -m shxy_save_editor.cli compare file0.rmmzsave file1.rmmzsave --path party._gold
+
+# 反查存档中某些值的位置
+python -m shxy_save_editor.cli find-value file1.rmmzsave 9999 100 --path variables._data
+
+# 查找两个存档中 old -> new 的变化路径
+python -m shxy_save_editor.cli find-change file0.rmmzsave file1.rmmzsave 0 100 --path variables._data
+
+# 查找两个存档中变化后等于指定值的路径
+python -m shxy_save_editor.cli find-to file0.rmmzsave file1.rmmzsave 100 --path variables._data
 ```
 
 ## 验证
@@ -81,6 +90,12 @@ python -m shxy_save_editor.cli compare file0.rmmzsave file1.rmmzsave --path part
 cd D:\Code\shxy-save-editor
 python -m unittest discover -s tests -v
 ```
+
+## 数据说明
+
+- 基础属性编辑的是存档里的角色 `_paramPlus`，保存时会按游戏内上限规则限制，避免读档后被游戏自动压回上限。
+- 道德、厨艺、酒量、钓鱼等级、炼药等级、运势对应游戏变量；未初始化的变量按 0 显示。
+- 命中、闪避、暴击常由职业/装备/状态 traits 计算而来；编辑器只会写入存档里已经存在的对应字段，不会改游戏数据库 traits。
 
 ## 备注
 

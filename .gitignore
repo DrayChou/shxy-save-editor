@@ -8,3 +8,5 @@ dist/
 build/
 *.bak
 *.bak.*
+*.rmmzsave
+*.rmmzsave.json

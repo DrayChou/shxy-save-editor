@@ -58,6 +58,75 @@ def diff_list(l1: list, l2: list, prefix: str = "") -> list[tuple[str, object, o
     return changes
 
 
+def find_value_paths(data: object, targets: set[object], prefix: str = "") -> list[tuple[str, object]]:
+    matches: list[tuple[str, object]] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            matches.extend(find_value_paths(value, targets, path))
+    elif isinstance(data, list):
+        for index, value in enumerate(data):
+            path = f"{prefix}[{index}]"
+            matches.extend(find_value_paths(value, targets, path))
+    elif data in targets:
+        matches.append((prefix, data))
+    return matches
+
+
+def format_value_matches(matches: list[tuple[str, object]], limit: int) -> list[str]:
+    lines: list[str] = []
+    by_value: dict[object, list[str]] = {}
+    for path, value in matches:
+        by_value.setdefault(value, []).append(path)
+    for value in sorted(by_value, key=lambda item: str(item)):
+        paths = by_value[value]
+        lines.append(f"值 {value!r}: 命中 {len(paths)} 处")
+        for path in paths[:limit]:
+            lines.append(f"  {path}")
+        if len(paths) > limit:
+            lines.append(f"  ... 还有 {len(paths) - limit} 处，使用 --limit 调大")
+        lines.append("")
+    return lines
+
+
+def find_changed_paths(data1: object, data2: object, old_value: object, new_value: object, prefix: str = "") -> list[str]:
+    matches: list[str] = []
+    if isinstance(data1, dict) and isinstance(data2, dict):
+        keys = set(data1.keys()) | set(data2.keys())
+        for key in sorted(keys, key=str):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            matches.extend(find_changed_paths(data1.get(key), data2.get(key), old_value, new_value, path))
+    elif isinstance(data1, list) and isinstance(data2, list):
+        max_len = max(len(data1), len(data2))
+        for index in range(max_len):
+            value1 = data1[index] if index < len(data1) else "<MISSING>"
+            value2 = data2[index] if index < len(data2) else "<MISSING>"
+            path = f"{prefix}[{index}]"
+            matches.extend(find_changed_paths(value1, value2, old_value, new_value, path))
+    elif data1 == old_value and data2 == new_value:
+        matches.append(prefix)
+    return matches
+
+
+def find_changed_to_paths(data1: object, data2: object, new_value: object, prefix: str = "") -> list[tuple[str, object, object]]:
+    matches: list[tuple[str, object, object]] = []
+    if isinstance(data1, dict) and isinstance(data2, dict):
+        keys = set(data1.keys()) | set(data2.keys())
+        for key in sorted(keys, key=str):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            matches.extend(find_changed_to_paths(data1.get(key), data2.get(key), new_value, path))
+    elif isinstance(data1, list) and isinstance(data2, list):
+        max_len = max(len(data1), len(data2))
+        for index in range(max_len):
+            value1 = data1[index] if index < len(data1) else "<MISSING>"
+            value2 = data2[index] if index < len(data2) else "<MISSING>"
+            path = f"{prefix}[{index}]"
+            matches.extend(find_changed_to_paths(value1, value2, new_value, path))
+    elif data1 != data2 and data2 == new_value:
+        matches.append((prefix, data1, data2))
+    return matches
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SHXY 存档工具")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -90,6 +159,25 @@ def build_parser() -> argparse.ArgumentParser:
     compare_p.add_argument("save1")
     compare_p.add_argument("save2")
     compare_p.add_argument("--path", default=None)
+
+    find_p = sub.add_parser("find-value", help="在存档中按真实数值反查路径")
+    find_p.add_argument("save_file")
+    find_p.add_argument("values", nargs="+", help="要查找的值，例如 61 100 5")
+    find_p.add_argument("--path", default=None, help="只在指定路径下查找，例如 variables._data 或 actors._data.1")
+    find_p.add_argument("--limit", type=int, default=80, help="每个值最多显示多少条路径")
+
+    change_p = sub.add_parser("find-change", help="在两个存档中查找指定 old -> new 的变化路径")
+    change_p.add_argument("save1")
+    change_p.add_argument("save2")
+    change_p.add_argument("old_value")
+    change_p.add_argument("new_value")
+    change_p.add_argument("--path", default=None, help="只在指定路径下查找，例如 variables._data 或 actors._data.1")
+
+    to_p = sub.add_parser("find-to", help="在两个存档中查找变化后等于指定值的路径")
+    to_p.add_argument("save1")
+    to_p.add_argument("save2")
+    to_p.add_argument("new_value")
+    to_p.add_argument("--path", default=None, help="只在指定路径下查找，例如 variables._data 或 actors._data.1")
 
     return parser
 
@@ -169,6 +257,52 @@ def main(argv: list[str] | None = None) -> int:
             print(item_path)
             print(f"  {args.save1}: {v1}")
             print(f"  {args.save2}: {v2}")
+        return 0
+
+    if args.command == "find-value":
+        data = read_save(args.save_file)
+        root = get_path(data, args.path) if args.path else data
+        prefix = args.path or ""
+        targets = {parse_value(item) for item in args.values}
+        matches = find_value_paths(root, targets, prefix)
+        if not matches:
+            print("没有找到匹配值")
+            return 0
+        for line in format_value_matches(matches, args.limit):
+            print(line)
+        return 0
+
+    if args.command == "find-change":
+        data1 = read_save(args.save1)
+        data2 = read_save(args.save2)
+        root1 = get_path(data1, args.path) if args.path else data1
+        root2 = get_path(data2, args.path) if args.path else data2
+        prefix = args.path or ""
+        old_value = parse_value(args.old_value)
+        new_value = parse_value(args.new_value)
+        matches = find_changed_paths(root1, root2, old_value, new_value, prefix)
+        if not matches:
+            print(f"没有找到 {old_value!r} -> {new_value!r} 的变化路径")
+            return 0
+        print(f"找到 {len(matches)} 处 {old_value!r} -> {new_value!r}:")
+        for path in matches:
+            print(path)
+        return 0
+
+    if args.command == "find-to":
+        data1 = read_save(args.save1)
+        data2 = read_save(args.save2)
+        root1 = get_path(data1, args.path) if args.path else data1
+        root2 = get_path(data2, args.path) if args.path else data2
+        prefix = args.path or ""
+        new_value = parse_value(args.new_value)
+        matches = find_changed_to_paths(root1, root2, new_value, prefix)
+        if not matches:
+            print(f"没有找到变化后等于 {new_value!r} 的路径")
+            return 0
+        print(f"找到 {len(matches)} 处变化后等于 {new_value!r}:")
+        for path, old, new in matches:
+            print(f"{path}: {old!r} -> {new!r}")
         return 0
 
     parser.error("unknown command")

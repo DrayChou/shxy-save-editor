@@ -10,20 +10,26 @@ from tkinter import filedialog, messagebox, ttk
 
 from .locator import GLOBAL_FILE, SaveLocation, discover_save_locations, infer_save_dir_from_game_dir, list_save_files
 from .model import (
+    CUSTOM_VARIABLE_LABELS,
+    EXTRA_STAT_LABELS,
     PARAM_LABELS,
     ActorSummary,
     SaveSlot,
     SaveSnapshot,
+    apply_actor_extra_stats,
     apply_actor_param_plus,
     apply_gold,
     apply_sp,
     buff_party,
     fill_inventory_section,
+    get_variable_value,
     list_slots,
     load_snapshot,
     make_backup,
     rebuild_snapshot,
     save_snapshot,
+    set_party_params,
+    set_variable_value,
 )
 
 TITLE_FONT = ("Microsoft YaHei UI", 16, "bold")
@@ -37,6 +43,14 @@ TEXT = "#eef2f7"
 MUTED = "#9ea8b7"
 BORDER = "#303845"
 SELECT = "#314158"
+CUSTOM_VARIABLE_INDEXES: dict[str, int | None] = {
+    "道德": 2,
+    "厨艺": 58,
+    "酒量": 51,
+    "钓鱼等级": 20,
+    "炼药等级": 76,
+    "运势": 79,
+}
 
 
 class SaveEditorApp(tk.Tk):
@@ -68,11 +82,16 @@ class SaveEditorApp(tk.Tk):
         self.sp_var = tk.StringVar(value="0")
         self.actor_name_var = tk.StringVar(value="未选择角色")
         self.actor_detail_var = tk.StringVar(value="-")
+        self.custom_var_info_var = tk.StringVar(value="已定位：道德=2；钓鱼等级=20；学点=44；酒量=51；厨艺=58；炼药等级=76；运势=79")
+
         self.buff_var = tk.StringVar(value="50")
         self.items_var = tk.StringVar(value="999")
         self.weapons_var = tk.StringVar(value="99")
         self.armors_var = tk.StringVar(value="99")
         self.param_vars = [tk.StringVar(value="0") for _ in PARAM_LABELS]
+        self.extra_stat_vars = {label: tk.StringVar(value="0") for label in EXTRA_STAT_LABELS}
+        self.custom_var_vars = {label: tk.StringVar(value="0") for label in CUSTOM_VARIABLE_LABELS}
+        self.custom_var_bindings: dict[str, int | None] = {label: None for label in CUSTOM_VARIABLE_LABELS}
 
         self._install_traces()
         self._build_style()
@@ -81,7 +100,7 @@ class SaveEditorApp(tk.Tk):
         self.after(80, lambda: self.refresh_locations(force=True))
 
     def _install_traces(self) -> None:
-        for var in [self.gold_var, self.sp_var, *self.param_vars]:
+        for var in [self.gold_var, self.sp_var, *self.param_vars, *self.extra_stat_vars.values(), *self.custom_var_vars.values()]:
             var.trace_add("write", self._on_editor_modified)
 
     def _on_editor_modified(self, *_args: object) -> None:
@@ -199,9 +218,40 @@ class SaveEditorApp(tk.Tk):
 
     def _build_right_panel(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(2, weight=1)
+        parent.rowconfigure(0, weight=1)
 
-        meta_box = ttk.LabelFrame(parent, text="当前存档", style="Section.TLabelframe", padding=12)
+        container = ttk.Frame(parent, style="Card.TFrame")
+        container.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(container, bg=CARD, highlightthickness=0, bd=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        content = ttk.Frame(canvas, style="Card.TFrame")
+        self.right_content = content
+        self.right_canvas = canvas
+        self.right_scrollbar = scrollbar
+
+        canvas_window = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _sync_scrollregion(_event: tk.Event | None = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _fit_content_width(event: tk.Event) -> None:
+            canvas.itemconfigure(canvas_window, width=event.width)
+
+        content.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _fit_content_width)
+        canvas.bind_all("<MouseWheel>", self._on_right_panel_mousewheel, add="+")
+
+        content.columnconfigure(0, weight=1)
+
+        meta_box = ttk.LabelFrame(content, text="当前存档", style="Section.TLabelframe", padding=12)
         meta_box.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         for idx in range(4):
             meta_box.columnconfigure(idx, weight=1)
@@ -211,7 +261,7 @@ class SaveEditorApp(tk.Tk):
         self._kv(meta_box, 1, 1, "时长", self.slot_playtime_var)
         self._kv(meta_box, 2, 0, "保存时间", self.slot_time_var, span=3)
 
-        resource_box = ttk.LabelFrame(parent, text="基础资源", style="Section.TLabelframe", padding=12)
+        resource_box = ttk.LabelFrame(content, text="基础资源", style="Section.TLabelframe", padding=12)
         resource_box.grid(row=1, column=0, sticky="ew", pady=(0, 12))
         for idx in range(4):
             resource_box.columnconfigure(idx, weight=1)
@@ -223,8 +273,19 @@ class SaveEditorApp(tk.Tk):
         ttk.Button(resource_box, text="设为 9999", command=lambda: self._set_numeric(self.sp_var, 9999)).grid(row=1, column=2, sticky="ew", pady=(10, 0))
         ttk.Label(resource_box, text="提示：保存时会自动备份为 .bak，可放心反复试", style="Muted.TLabel").grid(row=2, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
-        party_box = ttk.LabelFrame(parent, text="队伍角色与属性加成", style="Section.TLabelframe", padding=12)
-        party_box.grid(row=2, column=0, sticky="nsew", pady=(0, 12))
+        custom_box = ttk.LabelFrame(content, text="人物/生活属性（已全部定位）", style="Section.TLabelframe", padding=12)
+        custom_box.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        for idx in range(4):
+            custom_box.columnconfigure(idx, weight=1)
+        for idx, label in enumerate(CUSTOM_VARIABLE_LABELS):
+            row = idx // 2
+            col = (idx % 2) * 2
+            ttk.Label(custom_box, text=label, style="Header.TLabel").grid(row=row, column=col, sticky="w", pady=6)
+            ttk.Entry(custom_box, textvariable=self.custom_var_vars[label]).grid(row=row, column=col + 1, sticky="ew", padx=(8, 12), pady=6)
+        ttk.Label(custom_box, textvariable=self.custom_var_info_var, style="Muted.TLabel", wraplength=500, justify="left").grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
+        party_box = ttk.LabelFrame(content, text="队伍角色与基础属性", style="Section.TLabelframe", padding=12)
+        party_box.grid(row=3, column=0, sticky="nsew", pady=(0, 12))
         party_box.columnconfigure(0, weight=3)
         party_box.columnconfigure(1, weight=4)
         party_box.rowconfigure(0, weight=1)
@@ -260,13 +321,23 @@ class SaveEditorApp(tk.Tk):
             ttk.Label(editor, text=label, style="Value.TLabel").grid(row=row, column=col, sticky="w", pady=6)
             ttk.Entry(editor, textvariable=self.param_vars[idx]).grid(row=row, column=col + 1, sticky="ew", padx=(8, 14), pady=6)
 
-        quick_box = ttk.LabelFrame(parent, text="快捷操作", style="Section.TLabelframe", padding=12)
-        quick_box.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        extra_row = 2 + (len(PARAM_LABELS) + 1) // 2 + 1
+        ttk.Label(editor, text="附加属性", style="Header.TLabel").grid(row=extra_row, column=0, columnspan=4, sticky="w", pady=(12, 4))
+        for idx, label in enumerate(EXTRA_STAT_LABELS):
+            row = extra_row + 1 + idx
+            ttk.Label(editor, text=label, style="Value.TLabel").grid(row=row, column=0, sticky="w", pady=6)
+            ttk.Entry(editor, textvariable=self.extra_stat_vars[label]).grid(row=row, column=1, sticky="ew", padx=(8, 14), pady=6)
+            ttk.Label(editor, text="仅写入已存在的存档字段；职业/装备/状态 trait 来源不会在这里改", style="Muted.TLabel").grid(row=row, column=2, columnspan=2, sticky="w", pady=6)
+
+        quick_box = ttk.LabelFrame(content, text="快捷操作", style="Section.TLabelframe", padding=12)
+        quick_box.grid(row=4, column=0, sticky="ew", pady=(0, 12))
         for idx in range(4):
             quick_box.columnconfigure(idx, weight=1)
-        ttk.Label(quick_box, text="全队属性 +", style="Header.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(quick_box, text="全队基础属性", style="Header.TLabel").grid(row=0, column=0, sticky="w")
+
         ttk.Entry(quick_box, textvariable=self.buff_var, width=8).grid(row=0, column=1, sticky="ew", padx=(8, 8))
-        ttk.Button(quick_box, text="应用到当前队伍", command=self.apply_party_buff).grid(row=0, column=2, sticky="ew")
+        ttk.Button(quick_box, text="全队增加", command=self.apply_party_buff).grid(row=0, column=2, sticky="ew")
+        ttk.Button(quick_box, text="全队设为该值", command=self.set_party_params_value).grid(row=0, column=3, sticky="ew", padx=(8, 0))
 
         ttk.Label(quick_box, text="道具数量", style="Header.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 0))
         ttk.Entry(quick_box, textvariable=self.items_var, width=8).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(10, 0))
@@ -280,14 +351,26 @@ class SaveEditorApp(tk.Tk):
         ttk.Entry(quick_box, textvariable=self.armors_var, width=8).grid(row=3, column=1, sticky="ew", padx=(8, 8), pady=(10, 0))
         ttk.Button(quick_box, text="填满护甲栏", command=lambda: self.fill_inventory("_armors", self.armors_var, "护甲栏")).grid(row=3, column=2, sticky="ew", pady=(10, 0))
 
-        actions = ttk.Frame(parent, style="Card.TFrame")
-        actions.grid(row=4, column=0, sticky="ew")
+        actions = ttk.Frame(content, style="Card.TFrame")
+        actions.grid(row=5, column=0, sticky="ew")
         for idx in range(4):
             actions.columnconfigure(idx, weight=1)
         ttk.Button(actions, text="只创建备份", command=self.backup_current).grid(row=0, column=0, sticky="ew", padx=(0, 8))
         ttk.Button(actions, text="重新加载当前存档", command=self.reload_current_slot).grid(row=0, column=1, sticky="ew", padx=(0, 8))
         ttk.Button(actions, text="导出 JSON", command=self.export_current_json).grid(row=0, column=2, sticky="ew", padx=(0, 8))
         ttk.Button(actions, text="保存修改", style="Accent.TButton", command=self.save_current_slot).grid(row=0, column=3, sticky="ew")
+
+    def _on_right_panel_mousewheel(self, event: tk.Event) -> None:
+        if not hasattr(self, "right_canvas"):
+            return
+        widget = event.widget
+        while widget is not None:
+            if widget is self.right_content:
+                break
+            widget = getattr(widget, "master", None)
+        else:
+            return
+        self.right_canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def _kv(self, parent: ttk.LabelFrame, row: int, column_group: int, label: str, variable: tk.StringVar, span: int = 1) -> None:
         column = column_group * 2
@@ -335,6 +418,35 @@ class SaveEditorApp(tk.Tk):
 
     def _location_label(self, location: SaveLocation) -> str:
         return f"{location.save_dir}  [{location.source}]"
+
+    def _detect_custom_variable_bindings(self, data: dict) -> dict[str, int | None]:
+        return {label: CUSTOM_VARIABLE_INDEXES.get(label) for label in CUSTOM_VARIABLE_LABELS}
+
+    def _refresh_custom_variable_ui(self) -> None:
+        if not self.snapshot:
+            for label in CUSTOM_VARIABLE_LABELS:
+                self.custom_var_vars[label].set("0")
+                self.custom_var_bindings[label] = None
+            self.custom_var_info_var.set("已定位：道德=2；钓鱼等级=20；学点=44；酒量=51；厨艺=58；炼药等级=76；运势=79")
+
+            return
+        bindings = self._detect_custom_variable_bindings(self.snapshot.data)
+        self.custom_var_bindings = bindings
+        infos: list[str] = []
+        self.loading_ui = True
+        try:
+            for label in CUSTOM_VARIABLE_LABELS:
+                index = bindings.get(label)
+                if index is None:
+                    self.custom_var_vars[label].set("0")
+                    infos.append(f"{label}: 未定位")
+                else:
+                    value = get_variable_value(self.snapshot.data, index, 0)
+                    self.custom_var_vars[label].set(str(value))
+                    infos.append(f"{label}: variables._data[{index}]")
+        finally:
+            self.loading_ui = False
+        self.custom_var_info_var.set("；".join(infos))
 
     def _on_location_selected(self, _event: tk.Event | None = None) -> None:
         index = self.location_combo.current()
@@ -439,6 +551,7 @@ class SaveEditorApp(tk.Tk):
             self.slot_time_var.set(snapshot.slot.timestamp or "-")
             self.gold_var.set(str(snapshot.gold))
             self.sp_var.set(str(snapshot.sp))
+            self._refresh_custom_variable_ui()
             self._populate_actor_tree(snapshot.actors)
             if snapshot.actors:
                 first_actor = snapshot.actors[0]
@@ -451,6 +564,8 @@ class SaveEditorApp(tk.Tk):
                 self.actor_name_var.set("当前队伍没有角色")
                 self.actor_detail_var.set("-")
                 for var in self.param_vars:
+                    var.set("0")
+                for var in self.extra_stat_vars.values():
                     var.set("0")
         finally:
             self.loading_ui = False
@@ -490,11 +605,22 @@ class SaveEditorApp(tk.Tk):
         try:
             self.actor_name_var.set(actor.name)
             nickname = f"，绰号：{actor.nickname}" if actor.nickname else ""
-            self.actor_detail_var.set(f"角色 ID: {actor.actor_id}，等级: {actor.level}，HP: {actor.hp}，MP: {actor.mp}，TP: {actor.tp}{nickname}")
+            extra_desc = []
+            for label in EXTRA_STAT_LABELS:
+                if label in actor.extra_stat_sources:
+                    extra_desc.append(f"{label}: {actor.extra_stats.get(label, 0)} (来源 {actor.extra_stat_sources[label]})")
+                else:
+                    extra_desc.append(f"{label}: 未识别")
+            self.actor_detail_var.set(
+                f"角色 ID: {actor.actor_id}，等级: {actor.level}，HP: {actor.hp}，MP: {actor.mp}，TP: {actor.tp}{nickname}｜" + "；".join(extra_desc)
+            )
             values = actor.param_plus[: len(PARAM_LABELS)]
             values.extend([0] * (len(PARAM_LABELS) - len(values)))
             for var, value in zip(self.param_vars, values):
                 var.set(str(value))
+            for label in EXTRA_STAT_LABELS:
+                var = self.extra_stat_vars[label]
+                var.set(str(actor.extra_stats.get(label, 0)))
         finally:
             self.loading_ui = False
 
@@ -513,8 +639,13 @@ class SaveEditorApp(tk.Tk):
             self.sp_var.set("0")
             self.actor_name_var.set("未选择角色")
             self.actor_detail_var.set("-")
+            self.custom_var_info_var.set("未识别到道德/厨艺/酒量/钓鱼/炼药/运势的变量映射")
             self.actor_tree.delete(*self.actor_tree.get_children())
             for var in self.param_vars:
+                var.set("0")
+            for var in self.extra_stat_vars.values():
+                var.set("0")
+            for var in self.custom_var_vars.values():
                 var.set("0")
         finally:
             self.loading_ui = False
@@ -537,12 +668,15 @@ class SaveEditorApp(tk.Tk):
             return True
         try:
             values = [self._parse_int(var.get(), label) for var, label in zip(self.param_vars, PARAM_LABELS)]
+            extra_values = {label: self._parse_int(self.extra_stat_vars[label].get(), label) for label in EXTRA_STAT_LABELS}
         except ValueError as exc:
             if show_error:
                 messagebox.showerror("输入错误", str(exc))
             return False
-        apply_actor_param_plus(self.snapshot.data, actor.actor_id, values)
-        actor.param_plus = values
+        applied_values = apply_actor_param_plus(self.snapshot.data, actor.actor_id, values)
+        apply_actor_extra_stats(self.snapshot.data, actor.actor_id, extra_values)
+        actor.param_plus = applied_values
+        actor.extra_stats.update(extra_values)
         return True
 
     def _apply_form_to_snapshot(self) -> bool:
@@ -553,11 +687,16 @@ class SaveEditorApp(tk.Tk):
         try:
             gold = self._parse_int(self.gold_var.get(), "金钱")
             sp = self._parse_int(self.sp_var.get(), "学点")
+            custom_values = {label: self._parse_int(self.custom_var_vars[label].get(), label) for label in CUSTOM_VARIABLE_LABELS}
         except ValueError as exc:
             messagebox.showerror("输入错误", str(exc))
             return False
         apply_gold(self.snapshot.data, gold)
         apply_sp(self.snapshot.data, sp)
+        for label, value in custom_values.items():
+            index = self.custom_var_bindings.get(label)
+            if index is not None:
+                set_variable_value(self.snapshot.data, index, value)
         self.snapshot.gold = gold
         self.snapshot.sp = sp
         return True
@@ -578,6 +717,23 @@ class SaveEditorApp(tk.Tk):
         self._fill_snapshot_ui(self.snapshot)
         self._set_dirty(True)
         self.status_var.set(f"已给当前队伍 {len(changed)} 名角色的 8 项属性各增加 {amount}")
+
+    def set_party_params_value(self) -> None:
+        if not self.snapshot:
+            messagebox.showinfo("提示", "请先选择一个存档")
+            return
+        if not self._apply_form_to_snapshot():
+            return
+        try:
+            amount = self._parse_int(self.buff_var.get(), "全队属性设定值")
+        except ValueError as exc:
+            messagebox.showerror("输入错误", str(exc))
+            return
+        changed = set_party_params(self.snapshot.data, amount)
+        rebuild_snapshot(self.snapshot)
+        self._fill_snapshot_ui(self.snapshot)
+        self._set_dirty(True)
+        self.status_var.set(f"已将当前队伍 {len(changed)} 名角色的 8 项属性统一设为 {amount}")
 
     def fill_inventory(self, section: str, variable: tk.StringVar, title: str) -> None:
         if not self.snapshot:
